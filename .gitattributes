@@ -1,0 +1,16 @@
+# Normalize text files in the repository
+* text=auto eol=lf
+
+# Windows command scripts require Windows line endings
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files must never be modified by Git
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.7z binary
