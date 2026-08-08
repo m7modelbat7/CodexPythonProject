@@ -35,6 +35,7 @@ A user defines reusable service metadata by providing a unique service name, an 
 2. **Given** no service has the proposed name, **When** the user saves a definition containing multiple uniquely named input parameters with supported data types and required indicators, **Then** the definition and every input parameter are saved together.
 3. **Given** an invalid service definition, **When** the user attempts to save it, **Then** nothing from that definition is saved and the user receives an understandable error identifying what must be corrected.
 4. **Given** a saved service definition, **When** the user attempts to save another service with the same name, **Then** the new definition is rejected without changing the saved definition.
+5. **Given** no saved service has a proposed canonical name, **When** two concurrent requests create that same canonical name, **Then** exactly one request succeeds with `201`, the other receives `409`, and the database contains one complete aggregate with no duplicate or partial aggregate.
 
 ---
 
@@ -75,7 +76,8 @@ A user selects one saved service definition and views all of its metadata.
 - A definition with zero input parameters remains valid.
 - A service name or input parameter name longer than 100 characters after surrounding whitespace is removed is rejected.
 - A description longer than 1,000 characters is rejected, and a definition containing more than 100 input parameters is rejected.
-- An omitted description and an empty description are accepted and convey that no description was provided.
+- An omitted description, explicit `null`, and an empty string are accepted and all store and retrieve as JSON `null`.
+- A non-empty description is preserved exactly as supplied string content; leading, trailing, and internal whitespace are not trimmed or otherwise normalized.
 - A missing output data type or any value outside the supported set is rejected.
 - A supported data type written with different letter casing is not silently reinterpreted; the user is told which exact values are supported.
 - If one input parameter among many is invalid, neither the service nor any of its parameters is saved.
@@ -108,6 +110,21 @@ A user selects one saved service definition and views all of its metadata.
 - **FR-020**: Supported data types MUST be stored and returned as the exact metadata labels defined in FR-008; this feature MUST NOT define or validate runtime values, formats, precision, ranges, or JSON structures for those types.
 - **FR-021**: After removing leading and trailing whitespace, a service name and each input parameter name MUST contain no more than 100 characters.
 - **FR-022**: A service description MUST contain no more than 1,000 characters, and a service definition MUST contain no more than 100 input parameters.
+- **FR-023**: Create input MUST be a JSON object and MUST reject unknown fields. `name`, `inputs`, and `output_data_type` are required and non-null; each input item MUST be an object whose `name`, `data_type`, and `required` fields are required and non-null. Missing, null, empty, wrong-primitive-type, extra-field, length-limit, collection-limit, duplicate-name, and unsupported-enum cases MUST follow the public validation rules below. Strings, arrays, objects, booleans, and null MUST be accepted only where the contract declares that exact JSON type; no primitive coercion is allowed.
+- **FR-024**: An omitted description, explicit null description, and empty-string description MUST all produce canonical stored and retrieved `description: null`. Any non-empty description MUST be stored and returned exactly as supplied, without trimming or other normalization, subject only to the 1,000-character limit.
+- **FR-025**: Validation MUST collect every independently detectable violation. A check is skipped only when its prerequisite value or structure cannot be established (for example, name length and canonical duplicate checks are skipped for a non-string name, and child checks are skipped when `inputs` is not an array). One underlying problem MUST produce only one violation. Violations MUST use the deterministic ordering and translation rules defined in the Public API Semantics section.
+- **FR-026**: Every public 4xx response MUST use the documented `application/problem+json` `Problem` envelope; framework-default FastAPI/Pydantic validation bodies MUST NOT be exposed.
+- **FR-027**: Public errors and logs MUST NOT expose request bodies, database credentials or secret-bearing database URLs, SQL text containing sensitive values, internal database constraint names, stack traces, or sensitive configuration. Unexpected failures MAY include a generated non-sensitive correlation ID in both the generic public response and sanitized logs.
+
+### Public API Semantics
+
+- JSON objects are closed: extra fields are `extra_field` violations. A missing required field is `required`; explicit null for a non-null field is `null_not_allowed`; a value of the wrong JSON primitive/container type is `invalid_type`; an empty canonical required name is `empty`; an over-limit string is `too_long`; more than 100 inputs is `too_many_items`; a repeated canonical input name is `duplicate`; and an unsupported enum label is `unsupported_value` with `allowed_values` in this exact order: `STRING`, `INTEGER`, `NUMBER`, `BOOLEAN`, `DATETIME`, `JSON`.
+- `Violation.field` uses request-relative JSON paths: top-level names such as `name`, indexed paths such as `inputs[2].required`, the containing object path for an extra field (for example `inputs[2].unexpected`), and `service_definition_id` for the path parameter. Transport-library locations are translated to these paths and library error text/codes are never returned directly.
+- Violations are ordered by schema/request position: top-level `name`, `description`, `inputs`, then `output_data_type`; within `inputs`, by ascending array index and then `name`, `data_type`, `required`, followed by extra fields in lexicographic field-name order; top-level extra fields follow declared fields in lexicographic order. When multiple rules apply to one field, prerequisite/shape errors precede value errors, then collection/duplicate errors. The server emits at most one violation for one underlying problem.
+- A `422` Problem has `type: /problems/validation-error`, `title: Validation failed`, `status: 422`, `detail: Request validation failed`, and one or more field-level `errors`. A malformed UUID is `422` with one `invalid_uuid` violation at `service_definition_id`.
+- A well-formed but unknown UUID returns a `404` Problem with `type: /problems/service-definition-not-found`, `title: Service definition not found`, `status: 404`, `detail: No service definition exists for the supplied identifier`, and `errors: []`.
+- A duplicate canonical service name, including the losing request in a concurrent race, returns a `409` Problem with `type: /problems/service-name-conflict`, `title: Service name conflict`, `status: 409`, `detail: A service definition with the canonical name already exists`, and exactly one field-level violation: `code: duplicate`, `field: name`, `message: A service definition with this canonical name already exists`. Constraint names are never exposed.
+- `instance` is optional and, when present, identifies only the request path. `correlation_id` is optional for expected 4xx responses and may be supplied as a non-sensitive opaque identifier; unexpected failures use it for log correlation.
 
 ### Key Entities
 
@@ -119,17 +136,19 @@ A user selects one saved service definition and views all of its metadata.
 
 ### Measurable Outcomes
 
-- **SC-001**: In acceptance testing, 100% of valid definitions—including definitions with zero inputs and definitions with multiple inputs—can be saved and retrieved with names in their canonical trimmed form and all other supplied metadata unaltered.
+- **SC-001**: In acceptance testing, 100% of valid definitions—including definitions with zero inputs and definitions with multiple inputs—can be saved and retrieved with names in canonical trimmed form, description in its FR-024 canonical form, and all remaining supplied metadata unaltered.
 - **SC-002**: In acceptance testing, 100% of invalid definitions covered by the validation requirements are rejected without any partial save or change to existing definitions.
-- **SC-003**: Users can create and save a valid service definition with up to 10 input parameters in under 3 minutes during a guided usability test.
-- **SC-004**: At least 90% of first-time users can save, list, and view a service definition without assistance in a usability test.
-- **SC-005**: In acceptance testing with at least 100 saved definitions, users receive the complete list and can open any selected definition, with visible results for each action within 2 seconds.
-- **SC-006**: At least 90% of usability-test participants can identify how to correct each displayed validation error on their first attempt.
+- **SC-003**: The documented quickstart can create a valid definition with up to 10 inputs, list it, and retrieve it using only REST requests and documented response data.
+- **SC-004**: Automated HTTP acceptance tests demonstrate create, empty/non-empty list, known get, invalid create, duplicate create, malformed UUID, and unknown UUID behavior using the documented schemas and status codes.
+- **SC-005**: On the documented local development environment (one local ASGI process and local PostgreSQL container), with at least 100 saved definitions, each create, list, and get acceptance request completes within 2 seconds end-to-end from HTTP request start through receipt of the complete HTTP response. This is a single-request acceptance target, not a percentile, load, SLA, throughput, or scalability requirement.
+- **SC-006**: Every documented validation category is exercised through automated behavior-focused tests or the quickstart and returns the deterministic actionable violation contract.
+- **SC-007**: Automated tests enforce at least 90% line coverage of application source. Coverage is a supporting quality signal, not a substitute for behavior-focused tests; domain/application critical paths and failure paths remain explicitly tested even when the threshold is met.
 
 ## Assumptions
 
 - All users have the same access because authentication, authorization, and multi-tenancy are explicitly out of scope.
 - Service names and input parameter names are trimmed before validation, comparison, storage, and retrieval; the trimmed value is canonical. Other character differences, including letter casing, remain significant.
+- Trimming means Python `str.strip()` surrounding-whitespace semantics, including Unicode whitespace recognized by that operation; it does not case-fold or alter internal whitespace.
 - The internal identifier is assigned by the system rather than supplied by the user; its representation is intentionally left to planning because it does not change user-visible behavior in this feature.
 - Data type values use the exact uppercase labels in the supported set; invalid casing produces a clear validation error rather than implicit conversion.
 - Runtime value formats and validation rules for the supported data-type labels will be defined only when a future feature introduces runtime values or service execution.

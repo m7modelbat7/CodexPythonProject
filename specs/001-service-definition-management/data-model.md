@@ -8,7 +8,7 @@
 |---|---|---|
 | `id` | UUID | System-generated UUIDv7 at successful construction; unique and immutable; never accepted on create |
 | `name` | string | Trim surrounding whitespace; required; 1–100 characters; unique globally by exact canonical value |
-| `description` | string or null | Omitted/empty means null; otherwise preserve supplied content; maximum 1,000 characters |
+| `description` | string or null | Omitted, explicit null, or empty string canonicalizes to null; otherwise preserve the supplied string exactly without trimming/normalization; maximum 1,000 characters |
 | `inputs` | ordered tuple of `InputParameter` | 0–100 items; supplied order is invariant |
 | `output_data_type` | `DataType` | Required exact label |
 
@@ -26,10 +26,10 @@ No lifecycle state or update transition exists. The only transition is candidate
 
 ## Validation algorithm
 
-1. Parse enough request structure to identify fields and array indices.
-2. Canonicalize every available service/parameter name with `strip()`.
-3. Independently check required values, lengths, enum membership, explicit boolean values, input count, and duplicate canonical parameter names.
-4. Accumulate violations in deterministic field order. Each contains `code`, JSON-style `field` path, and actionable `message`; unsupported type errors also contain `allowed_values`.
+1. Parse enough request structure to identify fields and array indices. Reject extra fields and primitive/container types that do not exactly match the transport schema; do not coerce values.
+2. Canonicalize every available string service/parameter name with Python `str.strip()`. Canonicalize an omitted, null, or empty description to null; preserve every non-empty description exactly.
+3. Independently check required/null values, empty canonical names, lengths, enum membership, explicit boolean values, input count, and duplicate canonical parameter names. Skip only a check whose prerequisite structure/value cannot be established; for example, do not run string length or duplicate-name checks on a non-string name, or child checks when `inputs` is not an array.
+4. Accumulate each underlying problem once using the specification's stable codes and deterministic field order: declared top-level fields; input index then declared child fields; lexicographically ordered extras; prerequisite/shape before value, collection, and duplicate violations. Each violation contains `code`, JSON-style `field`, and safe actionable `message`; unsupported values also contain the exact ordered `allowed_values` set.
 5. Construct the immutable aggregate and allocate its ID only when the collection is empty.
 6. Check global name uniqueness at persistence time. A conflicting database constraint is a conflict, not a domain-field validation error.
 
@@ -72,13 +72,14 @@ The initial migration also checks `position >= 0 AND position < 100`. Applicatio
 ## Ordering and query semantics
 
 - Detail queries order children by `position ASC`.
-- List queries order definitions case-insensitively, then by exact stored name, then UUID. The selected PostgreSQL expression/collation must be tested against representative Unicode values. If database `lower` is insufficient for Python-style case folding, persist an indexed `name_sort_key = canonical_name.casefold()` infrastructure column and order by it.
+- List queries use a simple PostgreSQL case-insensitive ordering expression, then exact stored name, then UUID. Acceptance examples include `alpha`, `Alpha`, `beta`, `Beta` and expect `Alpha`, `alpha`, `Beta`, `beta` under the documented local database collation. The exact-name comparison and UUID make the order total.
+- No persisted `name_sort_key` or special Unicode infrastructure is required initially. This feature is not comprehensive international collation support. Such infrastructure may be considered only if implementation tests show the selected PostgreSQL ordering cannot satisfy these documented examples.
 - Name uniqueness is exact and case-sensitive after trimming: `Pump` and `pump` may coexist. The UUID tie-break makes list order total even if collation considers exact strings equivalent.
 
 ## Transaction and concurrency invariants
 
 - Insert parent and all children in one transaction; rollback on any failure.
-- The global unique constraint decides races between same-name creates. The adapter translates its named constraint to an application `name_conflict` result.
+- The global unique constraint decides races between same-canonical-name creates. Exactly one concurrent transaction commits; the losing transaction rolls back and its constraint is translated to the documented `409` name conflict without exposing the internal constraint name. No duplicate or partial aggregate remains.
 - Repository reads never return partially initialized aggregates; missing/malformed rows are treated as integrity failures, not silently repaired.
 - Database IDs and canonical names are never updated in this feature.
 

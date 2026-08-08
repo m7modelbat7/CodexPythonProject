@@ -20,9 +20,9 @@ Build the first vertical slice of a modular Python monolith: a versioned JSON HT
 
 **Project Type**: Single deployable API, modular monolith, `src` package layout
 
-**Performance Goals**: Create/get/list requests complete within 2 seconds in acceptance tests with at least 100 definitions; no speculative throughput target
+**Performance Goals**: On the documented local environment, each create/list/get acceptance request completes within 2 seconds end-to-end at the HTTP boundary with at least 100 saved definitions; this single-request target introduces no load, percentile, SLA, throughput, or scalability infrastructure
 
-**Constraints**: Atomic create; immutable UUID identifier; case-sensitive uniqueness after trimming; maximum 100 inputs; return all domain-detectable validation errors; deterministic case-insensitive list order with exact-name tie-break; no UI, identity, execution, messaging, cache, worker, or external integration
+**Constraints**: Atomic create; immutable UUID identifier; case-sensitive uniqueness after trimming; maximum 100 inputs; deterministic aggregated boundary/domain validation; mandatory Problem envelope for every public 4xx; deterministic case-insensitive list order with exact-name and UUID tie-breaks; no UI, identity, execution, messaging, cache, worker, or external integration
 
 **Scale/Scope**: One feature module, three use cases, three endpoints, two tables, one process, one database
 
@@ -80,7 +80,7 @@ The database unique constraint is authoritative under concurrent requests. A pre
 
 ## Boundaries and Responsibilities
 
-- **Domain** owns `ServiceDefinition`, `InputParameter`, exact `DataType` labels, normalization, limits, duplicate detection, ordered-input invariants, immutable identity, and aggregated domain errors. It uses standard-library types only.
+- **Domain** owns `ServiceDefinition`, `InputParameter`, exact `DataType` labels, name normalization, description canonicalization, limits, duplicate detection, ordered-input invariants, immutable identity, and aggregated domain errors. It uses standard-library types only.
 - **Application** owns create/list/get orchestration, repository and unit-of-work protocols, result/error translation independent of HTTP, and transaction scope. It does not issue SQL.
 - **Persistence** owns SQLAlchemy mappings, queries, PostgreSQL constraint translation, aggregate rehydration, and Alembic migrations. ORM types do not cross this boundary.
 - **API/transport** owns `/api/v1`, Pydantic request/response schemas, status codes, problem details, and dependency wiring. It does not contain domain rules.
@@ -150,10 +150,11 @@ tests/
 ## Error and Transaction Policy
 
 - Domain construction returns or raises one structured collection containing every independently detectable error, with stable code, field path, and plain-language message.
-- Boundary shape/type errors use the same public problem envelope where practical; unsupported data types include the complete supported set.
-- A duplicate service name maps to `409 Conflict`; invalid input to `422 Unprocessable Content`; absent UUID to `404 Not Found`.
+- The API installs explicit request-validation and HTTP exception translation so every public 4xx, including FastAPI/Pydantic body/path validation, uses the OpenAPI `application/problem+json` envelope; framework-default validation bodies never escape.
+- Transport errors are translated deterministically using the specification's field-path, code, safe-message, allowed-values, ordering, prerequisite, and deduplication rules, and are aggregated with independently detectable domain errors where both can be established.
+- A malformed UUID maps to `422`; a well-formed absent UUID maps to `404`; a duplicate canonical service name maps to `409` with the documented field-level `name` violation. The OpenAPI contract defines all Problem fields for these cases.
 - Create is one database transaction. Flush both parent and parameters before commit; any exception rolls back. Reads use short-lived sessions.
-- Expected errors are logged without stack traces or request bodies; unexpected failures receive a correlation ID and a generic `500` response.
+- Public errors and logs never contain request bodies, database credentials or secret-bearing URLs, SQL text with sensitive values, internal constraint names, stack traces, or sensitive configuration. Expected errors use sanitized structured context. Unexpected failures receive a non-sensitive correlation ID shared by sanitized logs and a generic public response.
 
 ## Migration Safety
 
@@ -166,17 +167,19 @@ tests/
 
 - **Domain unit tests**: whitespace canonicalization; empty/length limits; exact type labels; explicit booleans; zero/100/101 inputs; duplicate names; stable order; all-errors aggregation; immutable ID.
 - **Application unit tests**: no repository call on invalid input; complete aggregate passed once; duplicate and not-found mapping; list ordering request; transaction commit/rollback behavior using focused fakes.
-- **Persistence integration tests**: schema at head; round trip; position ordering; parent/children atomic rollback; uniqueness under database enforcement; exact-case name behavior; deterministic list collation expression.
-- **HTTP contract tests**: the three endpoints, empty list, UUID/path validation, status codes, response schemas, error envelope, and no partial save after failure.
+- **Persistence integration tests**: schema at head; round trip; position ordering; parent/children atomic rollback; exact-case name behavior; the selected simple PostgreSQL ordering expression; and concurrent same-canonical-name creation proving exactly one commit, one translated conflict, and no duplicate/partial aggregate.
+- **HTTP contract tests**: the three endpoints, empty list, all public input categories, deterministic aggregated violation order/deduplication, UUID/path validation, 404/409/422 Problem fields and media type, suppression of framework-default validation responses, safe errors, response schemas, and no partial save after failure.
 - Do not duplicate domain permutations through HTTP tests, and do not mock SQLAlchemy in unit tests.
 
 ## Quality and Security Gates
 
-Run `ruff format --check`, `ruff check`, `mypy --strict`, `pytest`, `coverage` threshold enforcement, `pip-audit`, and `bandit` against application source. Pin direct requirements with compatible constraints and commit `uv.lock`. CI should also run Alembic upgrade on a blank PostgreSQL database and verify a single migration head.
+Run `ruff format --check`, `ruff check`, `mypy --strict`, `pytest --cov=src/industrial_platform --cov-report=term-missing --cov-fail-under=90`, `pip-audit`, and `bandit -r src`. The initial gate is at least 90% automated line coverage of application source. Coverage supports but never replaces behavior-focused tests; domain/application critical paths and failure paths remain explicit tests even when the number is met. Pin direct requirements with compatible constraints and commit `uv.lock`. CI should also run Alembic upgrade on a blank PostgreSQL database and verify a single migration head.
 
 ## Consequential Decisions
 
 Detailed beginner-friendly comparisons are recorded in [research.md](research.md). Key choices are Python 3.14, FastAPI/Pydantic v2, synchronous SQLAlchemy 2 with Psycopg 3, PostgreSQL, Alembic, pytest, Ruff/mypy/Bandit/pip-audit, and uv. The domain remains plain Python and therefore is the least expensive part to preserve when any edge technology changes.
+
+The final ordering decision in [data-model.md](data-model.md) supersedes the exploratory Unicode sort-key fallback discussed in research: start with the simple tested PostgreSQL expression and documented mixed-case examples, and add no persisted sort key or special Unicode infrastructure unless implementation tests cannot satisfy those examples.
 
 ## Complexity Tracking
 

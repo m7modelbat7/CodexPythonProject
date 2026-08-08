@@ -2,7 +2,10 @@ openapi: 3.1.0
 info:
   title: Industrial Platform Service Definition API
   version: 1.0.0
-  description: Create, list, and view immutable service-definition metadata. Execution and editing are out of scope.
+  description: >-
+    Create, list, and view immutable service-definition metadata. Execution and editing are out of scope.
+    Every public 4xx response, including transport/framework validation, uses the documented
+    application/problem+json Problem envelope; FastAPI/Pydantic default validation bodies are not public.
 servers:
   - url: /api/v1
 paths:
@@ -27,12 +30,16 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ServiceDefinition' }
         '409':
-          description: Canonical service name already exists
+          description: >-
+            Canonical service name already exists. Problem is /problems/service-name-conflict with
+            status 409 and exactly one duplicate violation for field name.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
-          description: All detectable request and domain validation errors
+          description: >-
+            All independently detectable request and domain validation errors in deterministic order.
+            Problem is /problems/validation-error with status 422.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -46,6 +53,7 @@ paths:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
                 required: [items]
                 properties:
                   items:
@@ -67,12 +75,16 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ServiceDefinition' }
         '404':
-          description: Definition does not exist
+          description: >-
+            A well-formed UUID identifies no definition. Problem is
+            /problems/service-definition-not-found with status 404 and an empty errors array.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
-          description: Path value is not a UUID
+          description: >-
+            Path value is not a UUID. Problem is /problems/validation-error with status 422 and one
+            invalid_uuid violation for service_definition_id.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -88,7 +100,7 @@ components:
       properties:
         name:
           type: string
-          description: Canonicalized with surrounding whitespace removed, then limited to 100 characters
+          description: Canonicalized with surrounding whitespace removed, then the canonical value is limited to 100 characters
         data_type: { $ref: '#/components/schemas/DataType' }
         required: { type: boolean }
     InputParameter:
@@ -101,11 +113,14 @@ components:
       properties:
         name:
           type: string
-          description: Canonicalized with surrounding whitespace removed, then limited to 100 characters
+          description: Canonicalized with surrounding whitespace removed, then the canonical value is limited to 100 characters
         description:
           type: [string, 'null']
           maxLength: 1000
           default: null
+          description: >-
+            Omitted, null, and empty string all store and retrieve as null. Any non-empty string is
+            preserved exactly; it is not trimmed or otherwise normalized.
         inputs:
           type: array
           maxItems: 100
@@ -138,23 +153,65 @@ components:
       additionalProperties: false
       required: [code, field, message]
       properties:
-        code: { type: string, description: Stable machine-readable code }
-        field: { type: string, description: JSON-style field path such as inputs[1].name }
-        message: { type: string }
+        code:
+          type: string
+          enum: [required, null_not_allowed, invalid_type, invalid_json, invalid_uuid, extra_field, empty, too_long, too_many_items, duplicate, unsupported_value]
+          description: Stable transport-independent machine-readable code
+        field:
+          type: string
+          description: Request-relative JSON-style path such as name, inputs[1].name, or service_definition_id; $ identifies the request document
+        message:
+          type: string
+          description: Stable safe application message; framework error text is never exposed
         allowed_values:
           type: array
+          description: Present only for unsupported_value, in DataType enum order
           items: { type: string }
     Problem:
       type: object
       additionalProperties: false
       required: [type, title, status, detail, errors]
       properties:
-        type: { type: string, format: uri-reference }
-        title: { type: string }
+        type:
+          type: string
+          format: uri-reference
+          description: One of /problems/validation-error, /problems/service-definition-not-found, or /problems/service-name-conflict for documented 4xx responses
+        title:
+          type: string
+          description: Validation failed, Service definition not found, or Service name conflict, matching type
         status: { type: integer, minimum: 400, maximum: 599 }
-        detail: { type: string }
-        instance: { type: string, format: uri-reference }
-        correlation_id: { type: string }
+        detail:
+          type: string
+          description: Stable summary for the problem type; contains no submitted values or internal details
+        instance:
+          type: string
+          format: uri-reference
+          description: Optional request path only
+        correlation_id:
+          type: string
+          description: Optional opaque non-sensitive identifier for correlation with sanitized logs
         errors:
           type: array
+          description: One or more ordered violations for 422; one name violation for 409; empty for 404
           items: { $ref: '#/components/schemas/Violation' }
+x-validation-translation:
+  strict-types: No JSON primitive coercion is permitted.
+  prerequisites: Collect every independently detectable violation; skip only checks whose prerequisite value or structure cannot be established.
+  deduplication: Emit at most one violation for the same underlying problem.
+  fields: >-
+    Translate transport locations to request-relative paths. Declared top-level order is name,
+    description, inputs, output_data_type. Child order is ascending index then name, data_type,
+    required. Extra fields follow declared fields in lexicographic name order.
+  rule-order: Prerequisite/shape errors precede value errors, then collection and duplicate errors.
+  mappings:
+    missing: { code: required, message: This field is required }
+    null: { code: null_not_allowed, message: Null is not allowed for this field }
+    wrong_type: { code: invalid_type, message: Value has the wrong JSON type }
+    malformed_json: { code: invalid_json, field: '$', message: Request body is not valid JSON }
+    extra: { code: extra_field, message: Extra fields are not allowed }
+    empty_name: { code: empty, message: Name must not be empty after surrounding whitespace is removed }
+    string_limit: { code: too_long, message: Value exceeds the documented character limit }
+    collection_limit: { code: too_many_items, message: Collection exceeds 100 items }
+    duplicate_name: { code: duplicate, message: Name duplicates another canonical name }
+    enum: { code: unsupported_value, message: Value is not supported, allowed_values: [STRING, INTEGER, NUMBER, BOOLEAN, DATETIME, JSON] }
+    uuid: { code: invalid_uuid, field: service_definition_id, message: Value must be a well-formed UUID }
