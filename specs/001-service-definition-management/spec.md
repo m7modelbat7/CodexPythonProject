@@ -1,6 +1,6 @@
 # Feature Specification: Service Definition Management
 
-**Feature Branch**: `001-service-definition-management`
+**Feature Branch**: `feat/service-definitions-v1`
 
 **Created**: 2026-08-08
 

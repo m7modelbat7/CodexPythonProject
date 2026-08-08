@@ -1,0 +1,160 @@
+openapi: 3.1.0
+info:
+  title: Industrial Platform Service Definition API
+  version: 1.0.0
+  description: Create, list, and view immutable service-definition metadata. Execution and editing are out of scope.
+servers:
+  - url: /api/v1
+paths:
+  /service-definitions:
+    post:
+      operationId: createServiceDefinition
+      summary: Create one complete service definition atomically
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateServiceDefinition'
+      responses:
+        '201':
+          description: Created
+          headers:
+            Location:
+              schema: { type: string }
+              description: Versioned path of the created definition
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceDefinition' }
+        '409':
+          description: Canonical service name already exists
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: All detectable request and domain validation errors
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    get:
+      operationId: listServiceDefinitions
+      summary: List all definitions in deterministic case-insensitive name order
+      responses:
+        '200':
+          description: Collection; items is empty when no definitions exist
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ServiceDefinitionSummary' }
+  /service-definitions/{service_definition_id}:
+    get:
+      operationId: getServiceDefinition
+      summary: Get complete metadata by immutable identifier
+      parameters:
+        - name: service_definition_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Complete definition
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceDefinition' }
+        '404':
+          description: Definition does not exist
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Path value is not a UUID
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+components:
+  schemas:
+    DataType:
+      type: string
+      enum: [STRING, INTEGER, NUMBER, BOOLEAN, DATETIME, JSON]
+    InputParameterRequest:
+      type: object
+      additionalProperties: false
+      required: [name, data_type, required]
+      properties:
+        name:
+          type: string
+          description: Canonicalized with surrounding whitespace removed, then limited to 100 characters
+        data_type: { $ref: '#/components/schemas/DataType' }
+        required: { type: boolean }
+    InputParameter:
+      allOf:
+        - $ref: '#/components/schemas/InputParameterRequest'
+    CreateServiceDefinition:
+      type: object
+      additionalProperties: false
+      required: [name, inputs, output_data_type]
+      properties:
+        name:
+          type: string
+          description: Canonicalized with surrounding whitespace removed, then limited to 100 characters
+        description:
+          type: [string, 'null']
+          maxLength: 1000
+          default: null
+        inputs:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/InputParameterRequest' }
+        output_data_type: { $ref: '#/components/schemas/DataType' }
+    ServiceDefinitionSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, description, output_data_type]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: [string, 'null'] }
+        output_data_type: { $ref: '#/components/schemas/DataType' }
+    ServiceDefinition:
+      type: object
+      additionalProperties: false
+      required: [id, name, description, inputs, output_data_type]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: [string, 'null'] }
+        inputs:
+          type: array
+          description: Preserved in user-supplied order
+          items: { $ref: '#/components/schemas/InputParameter' }
+        output_data_type: { $ref: '#/components/schemas/DataType' }
+    Violation:
+      type: object
+      additionalProperties: false
+      required: [code, field, message]
+      properties:
+        code: { type: string, description: Stable machine-readable code }
+        field: { type: string, description: JSON-style field path such as inputs[1].name }
+        message: { type: string }
+        allowed_values:
+          type: array
+          items: { type: string }
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail, errors]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        correlation_id: { type: string }
+        errors:
+          type: array
+          items: { $ref: '#/components/schemas/Violation' }
