@@ -53,7 +53,7 @@ service_definitions (1) ------< (0..100) service_definition_inputs
 | Column | PostgreSQL type | Null | Constraint/purpose |
 |---|---|---:|---|
 | `id` | `uuid` | no | Primary key; supplied by application; never updated |
-| `name` | `varchar(100)` | no | Unique canonical name; non-empty check |
+| `name` | `varchar(100)` | no | Unique canonical name through the explicitly named `uq_service_definitions_name` constraint; non-empty check |
 | `description` | `varchar(1000)` | yes | Null means no description |
 | `output_data_type` | `varchar(8)` | no | Check constraint for six exact labels |
 
@@ -69,17 +69,29 @@ service_definitions (1) ------< (0..100) service_definition_inputs
 
 The initial migration also checks `position >= 0 AND position < 100`. Application validation remains primary; constraints defend data against races, defects, and other database clients. The maximum child count cannot be completely guaranteed by a simple row check, so the transaction and aggregate enforce it.
 
+## Ownership and lifecycle semantics
+
+- The Service Definition Management module is the sole logical owner of both `service_definitions` and `service_definition_inputs`, including their schema and invariants. Other modules must not mutate either table directly; data access and schema evolution remain behind this module's approved persistence boundary and module-owned Alembic migrations.
+- A successfully committed service definition is immutable and retained without automatic expiration or TTL. There is no scheduled purge, application deletion endpoint, lifecycle transition, soft-delete marker, archive state, retention duration, history/versioning mechanism, or cleanup job in this feature. It remains until a separately specified and approved future lifecycle/deletion capability or an authorized operational database restore or maintenance action changes it.
+- Rows in `service_definition_inputs` are aggregate children of `service_definitions`. They are not independently owned and have no independent deletion or lifecycle operation. Their foreign key and cascade rule preserve aggregate integrity during authorized parent-level database operations; the cascade does not create an application deletion path.
+- Alembic migrations are the module-owned schema evolution mechanism. Migration review must consider preservation of production data, and any future destructive behavior requires explicit approval. Current development/test downgrade coverage proves migration reversibility only and is not a retention or deletion mechanism.
+- PostgreSQL backups, backup retention, restore procedures, and infrastructure disaster recovery are deployment/platform-operator responsibilities. The feature provides no backup automation, replication, snapshots, point-in-time recovery, cloud backup integration, RPO, or RTO promise, and does not imply that backups exist. Its responsibility ends at reviewed migrations, transactional integrity, and correct operation after a restore to a valid supported database state followed by migration to the expected head.
+
 ## Ordering and query semantics
 
 - Detail queries order children by `position ASC`.
-- List queries use a simple PostgreSQL case-insensitive ordering expression, then exact stored name, then UUID. Acceptance examples include `alpha`, `Alpha`, `beta`, `Beta` and expect `Alpha`, `alpha`, `Beta`, `beta` under the documented local database collation. The exact-name comparison and UUID make the order total.
-- No persisted `name_sort_key` or special Unicode infrastructure is required initially. This feature is not comprehensive international collation support. Such infrastructure may be considered only if implementation tests show the selected PostgreSQL ordering cannot satisfy these documented examples.
-- Name uniqueness is exact and case-sensitive after trimming: `Pump` and `pump` may coexist. The UUID tie-break makes list order total even if collation considers exact strings equivalent.
+- List queries derive a primary key from the canonical stored name by translating only ASCII uppercase `A`-`Z` to lowercase `a`-`z`, leaving every other Unicode code point unchanged. They order by that key and then by exact stored canonical name, with both comparisons using deterministic Unicode code-point order, equivalently UTF-8 byte order under PostgreSQL `C` collation. Acceptance examples `alpha`, `Alpha`, `beta`, `Beta` therefore return as `Alpha`, `alpha`, `Beta`, `beta`. A focused non-ASCII pair such as `Äther`, `äther` remains distinct and is not locale/case-fold normalized; under the defined `C` order it returns as `Äther`, `äther`.
+- No persisted `name_sort_key`, Unicode normalization, locale/ICU configuration, third-party collation library, or other international-collation infrastructure is required. Arbitrary Unicode names remain valid, but case-insensitive behavior is intentionally ASCII-only. No tertiary ordering key is used.
+- Name uniqueness is exact and case-sensitive after trimming: `Pump` and `pump` may coexist. Because exact canonical names are globally unique, the secondary exact-name key already provides a total order for every valid persisted row; UUID is not needed for list ordering.
 
 ## Transaction and concurrency invariants
 
-- Insert parent and all children in one transaction; rollback on any failure.
-- The global unique constraint decides races between same-canonical-name creates. Exactly one concurrent transaction commits; the losing transaction rolls back and its constraint is translated to the documented `409` name conflict without exposing the internal constraint name. No duplicate or partial aggregate remains.
+- The application constructs and validates the complete aggregate before persistence, then owns the create transaction outcome.
+- Repository save adds the parent and ordered children to the current SQLAlchemy session and explicitly flushes them so database failures are observable before it returns; repository save never commits.
+- After a successful repository flush, the application instructs the unit of work to commit exactly once. The unit of work performs only commit, rollback, and session cleanup mechanics.
+- The explicitly named `uq_service_definitions_name` constraint decides races between same-canonical-name creates. The repository alone identifies that reviewed constraint and translates its flush failure to the existing application-level name conflict without exposing the constraint identity beyond persistence. The application catches that conflict, instructs rollback, and propagates it for the existing HTTP `409` translation.
+- An unrelated flush/integrity failure is re-raised untranslated; the application instructs rollback and allows the unexpected-failure path to handle it. A failure from commit after successful flush also triggers application-owned rollback and is not classified as a duplicate-name conflict.
+- Exactly one concurrent same-canonical-name request commits; the other receives the translated conflict, and no duplicate, orphan, or partial aggregate remains.
 - Repository reads never return partially initialized aggregates; missing/malformed rows are treated as integrity failures, not silently repaired.
 - Database IDs and canonical names are never updated in this feature.
 

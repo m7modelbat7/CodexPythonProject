@@ -4,8 +4,10 @@ info:
   version: 1.0.0
   description: >-
     Create, list, and view immutable service-definition metadata. Execution and editing are out of scope.
-    Every public 4xx response, including transport/framework validation, uses the documented
-    application/problem+json Problem envelope; FastAPI/Pydantic default validation bodies are not public.
+    Every public 4xx response, including transport/framework validation, unknown routes, and unsupported
+    methods, uses the documented application/problem+json Problem envelope; FastAPI/Starlette default
+    JSON or plain-text error bodies and raw exception details are not public. Unknown routes use
+    /problems/not-found; unsupported methods use /problems/method-not-allowed and preserve Allow.
 servers:
   - url: /api/v1
 paths:
@@ -169,17 +171,28 @@ components:
           items: { type: string }
     Problem:
       type: object
+      description: >-
+        Shared application/problem+json envelope intentionally used for every documented or reachable
+        public 4xx response and for the single sanitized, correlated unexpected 500 response defined by
+        the architecture. No other 5xx behavior is introduced by this schema.
       additionalProperties: false
       required: [type, title, status, detail, errors]
       properties:
         type:
           type: string
           format: uri-reference
-          description: One of /problems/validation-error, /problems/service-definition-not-found, or /problems/service-name-conflict for documented 4xx responses
+          description: Stable documented problem type, including feature-specific types plus /problems/not-found and /problems/method-not-allowed for router-level 404 and 405
         title:
           type: string
-          description: Validation failed, Service definition not found, or Service name conflict, matching type
-        status: { type: integer, minimum: 400, maximum: 599 }
+          description: Stable safe title matching the problem type
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+          description: >-
+            HTTP error status from 400 through 599. This range intentionally covers all approved public
+            4xx Problems plus the approved generic unexpected 500 Problem; it does not define additional
+            5xx responses.
         detail:
           type: string
           description: Stable summary for the problem type; contains no submitted values or internal details
@@ -192,7 +205,7 @@ components:
           description: Optional opaque non-sensitive identifier for correlation with sanitized logs
         errors:
           type: array
-          description: One or more ordered violations for 422; one name violation for 409; empty for 404
+          description: One or more ordered violations for 422; one name violation for 409; empty for 404, 405, and the sanitized unexpected 500
           items: { $ref: '#/components/schemas/Violation' }
 x-validation-translation:
   strict-types: No JSON primitive coercion is permitted.
